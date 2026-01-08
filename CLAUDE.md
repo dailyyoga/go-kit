@@ -12,7 +12,7 @@ This is a Go toolkit library (`github.com/dailyyoga/nexgo`) providing seven core
 - **kafka** - Kafka consumer/producer wrappers with retry, parallel processing, and error handling
 - **cron** - Cron job manager with chain-based task execution and middleware support
 - **routine** - Safe goroutine execution with panic recovery to prevent application crashes
-- **cache** - Syncable cache with periodic data synchronization and automatic retry logic
+- **cache** - Syncable cache with periodic data synchronization, automatic retry logic, and Redis client wrapper
 
 All packages use interface-driven design for testability. The logger package provides a unified `Logger` interface used across all other packages.
 
@@ -134,6 +134,7 @@ All other packages (db, ch, kafka, cron, routine, cache) accept `logger.Logger` 
 - `cron.NewCron(logger, middlewares...)`
 - `routine.New(logger)`
 - `cache.NewSyncableCache(logger, config, syncFunc)`
+- `cache.NewRedis(logger, config)`
 
 ### Package: db (MySQL Database Client)
 
@@ -549,6 +550,127 @@ if err := c.Sync(ctx); err != nil {
 }
 ```
 
+### Package: cache/Redis (Redis Client)
+
+**Core Pattern**: Thin wrapper around go-redis v9 that embeds `redis.Cmdable` to automatically provide 200+ Redis commands.
+
+**Key Components**:
+- `Redis` interface - Embeds `redis.Cmdable` plus custom methods: `Subscribe()`, `PSubscribe()`, `Close()`, `Unwrap()`, `PoolStats()`
+- `RedisConfig` struct - Configuration with connection pool settings and timeouts
+- `NewRedis(log, cfg)` factory - Creates client, validates config, and tests connection
+
+**Architecture Details**:
+- Embeds `*redis.Client` to automatically implement all `redis.Cmdable` methods (200+ commands)
+- Thread-safe: `redis.Client` handles all concurrency internally
+- Connection test: `Ping()` executed during initialization to verify connectivity
+- Custom Subscribe methods wait for subscription confirmation before returning
+- Direct access to underlying client via `Unwrap()` for advanced operations (Pipeline, Transaction, etc.)
+- Pool statistics available via `PoolStats()`
+
+**Important Files**:
+- `cache.go` - `Redis` interface definition (along with `SyncableCache`)
+- `config.go` - `RedisConfig` with `Validate()`, `MergeDefaults()`, `Options()`
+- `redis.go` - Implementation (`defaultRedis`) with `NewRedis()` factory
+- `errors.go` - Redis-specific error constructors
+
+**Configuration**:
+```go
+cfg := &cache.RedisConfig{
+    Addr:            "localhost:6379",  // Redis address (required)
+    Password:        "",                 // Auth password (default: "")
+    DB:              0,                  // Database number (default: 0)
+    PoolSize:        10,                 // Max connections (default: 10)
+    MinIdleConns:    5,                  // Min idle connections (default: 5)
+    MaxRetries:      3,                  // Max retries (default: 3)
+    DialTimeout:     5 * time.Second,   // Dial timeout (default: 5s)
+    ReadTimeout:     3 * time.Second,   // Read timeout (default: 3s)
+    WriteTimeout:    3 * time.Second,   // Write timeout (default: 3s)
+    ConnMaxIdleTime: 5 * time.Minute,   // Max idle time (default: 5m)
+    ConnMaxLifetime: 0,                  // Max lifetime (default: 0, no limit)
+}
+rdb, err := cache.NewRedis(log, cfg)
+```
+
+**Usage**:
+```go
+import (
+    "github.com/dailyyoga/nexgo/cache"
+    "github.com/redis/go-redis/v9"
+)
+
+// Create Redis client
+rdb, err := cache.NewRedis(log, cfg)
+if err != nil {
+    return err
+}
+defer rdb.Close()
+
+ctx := context.Background()
+
+// String operations
+rdb.Set(ctx, "key", "value", time.Hour)
+val, err := rdb.Get(ctx, "key").Result()
+if err == cache.Nil {
+    // Key does not exist
+}
+
+// Distributed lock with SetNX
+ok, _ := rdb.SetNX(ctx, "lock:resource", "owner", 30*time.Second).Result()
+
+// Hash operations
+rdb.HSet(ctx, "user:1", "name", "Alice", "age", "25")
+name, _ := rdb.HGet(ctx, "user:1", "name").Result()
+
+// List operations
+rdb.LPush(ctx, "queue", "task1", "task2")
+task, _ := rdb.RPop(ctx, "queue").Result()
+
+// Sorted set operations
+rdb.ZAdd(ctx, "leaderboard", redis.Z{Score: 100, Member: "player1"})
+rank, _ := rdb.ZRank(ctx, "leaderboard", "player1").Result()
+
+// Pub/Sub
+pubsub, err := rdb.Subscribe(ctx, "channel")
+if err != nil {
+    return err
+}
+defer pubsub.Close()
+
+// Pattern subscription
+pubsub, err := rdb.PSubscribe(ctx, "events:*")
+
+// Lua script
+result, _ := rdb.Eval(ctx, `return ARGV[1]`, nil, "hello").Result()
+
+// Pipeline (via Unwrap)
+pipe := rdb.Unwrap().Pipeline()
+incr := pipe.Incr(ctx, "counter")
+pipe.Expire(ctx, "counter", time.Hour)
+pipe.Exec(ctx)
+count, _ := incr.Result()
+
+// Transaction (via Unwrap)
+rdb.Unwrap().Watch(ctx, func(tx *redis.Tx) error {
+    // Transaction logic
+    return nil
+}, "key")
+
+// Pool statistics
+stats := rdb.PoolStats()
+log.Info("pool stats", zap.Uint32("total", stats.TotalConns))
+```
+
+**Available Commands** (via `redis.Cmdable`):
+- **String**: Get, Set, SetNX, SetEX, MGet, MSet, Incr, Decr, Append, etc.
+- **Key**: Del, Exists, Expire, TTL, Keys, Scan, Rename, Type, etc.
+- **Hash**: HGet, HSet, HGetAll, HDel, HExists, HIncrBy, HScan, etc.
+- **List**: LPush, RPush, LPop, RPop, LRange, LLen, LIndex, etc.
+- **Set**: SAdd, SRem, SMembers, SIsMember, SCard, SInter, SUnion, etc.
+- **Sorted Set**: ZAdd, ZRem, ZRange, ZRank, ZScore, ZCard, ZIncrBy, etc.
+- **Script**: Eval, EvalSha, ScriptLoad, ScriptExists, ScriptFlush
+- **Pub/Sub**: Publish (Subscribe/PSubscribe via custom methods)
+- **Server**: Ping, Info, DBSize, FlushDB, etc.
+
 ## Cross-Cutting Patterns
 
 ### Logger Interface
@@ -640,7 +762,7 @@ All packages follow a unified error handling pattern, defining package-level err
 
 - **cache** package:
   - Predefined errors: `ErrCacheClosed`, `ErrInvalidConfig`
-  - Error constructors: `ErrSync(err)`, `ErrInvalidName(name)`, `ErrInvalidSyncInterval(interval)`, `ErrInvalidSyncTimeout(timeout)`, `ErrInvalidMaxRetries(retries)`
+  - Error constructors: `ErrSync(err)`, `ErrInvalidName(name)`, `ErrInvalidSyncInterval(interval)`, `ErrInvalidSyncTimeout(timeout)`, `ErrInvalidMaxRetries(retries)`, `ErrInvalidRedisConfig(msg)`, `ErrRedisConnection(err)`, `ErrRedisOperation(op, err)`
 
 **Error Checking**:
 - Use `errors.Is()` to check predefined errors:
@@ -682,3 +804,4 @@ All packages follow a unified error handling pattern, defining package-level err
 - **Enum Handling**: Empty strings in enum columns replaced with first enum value
 - **Routine Package**: Use `Runner` interface when you need to track goroutines and wait for completion; use standalone functions for fire-and-forget scenarios
 - **Cache Package**: Must call `Start()` before `Get()`, `Start()` blocks until initial sync succeeds. Call `Stop()` for graceful shutdown. Sync errors are retried automatically with exponential backoff. **CRITICAL**: `Get()` returns a reference for reference types (slice, map, pointer) - treat returned data as read-only to avoid data races. Create a deep copy if modification is needed. Value types (int, string, struct without pointers) are automatically safe as Go copies them
+- **Redis Package**: Call `Close()` on shutdown. Use `cache.Nil` to check for non-existent keys. Use `Unwrap()` for Pipeline/Transaction operations. The client is fully thread-safe

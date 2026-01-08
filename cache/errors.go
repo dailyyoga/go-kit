@@ -39,3 +39,18 @@ func ErrInvalidSyncTimeout(timeout time.Duration) error {
 func ErrInvalidMaxRetries(retries int) error {
 	return fmt.Errorf("cache: invalid max retries: %d (must be >= 1)", retries)
 }
+
+// ErrInvalidRedisConfig returns an error for invalid Redis configuration
+func ErrInvalidRedisConfig(msg string) error {
+	return fmt.Errorf("cache: invalid redis config: %s", msg)
+}
+
+// ErrRedisConnection wraps a Redis connection error
+func ErrRedisConnection(err error) error {
+	return fmt.Errorf("cache: redis connection failed: %w", err)
+}
+
+// ErrRedisOperation wraps a Redis operation error
+func ErrRedisOperation(op string, err error) error {
+	return fmt.Errorf("cache: redis %s failed: %w", op, err)
+}

@@ -1,9 +1,10 @@
 # cache
 
-A generic Go cache library with periodic synchronization, automatic retry logic, and exponential backoff.
+A Go cache library providing periodic synchronization cache and Redis client wrapper.
 
 ## Features
 
+### SyncableCache
 - **Generic Type Support**: Built with Go generics to support any data type in a type-safe manner
 - **Periodic Synchronization**: Automatically refreshes cached data from a configurable source at regular intervals
 - **Automatic Retry**: Exponential backoff retry mechanism for transient failures (network issues, timeouts)
@@ -12,6 +13,13 @@ A generic Go cache library with periodic synchronization, automatic retry logic,
 - **Graceful Shutdown**: Safe shutdown with `Stop()` that can be called multiple times
 - **Initial Sync**: Blocks on `Start()` until initial data is successfully loaded
 - **Error Classification**: Automatically distinguishes retryable vs non-retryable errors
+
+### Redis
+- **200+ Commands**: Embeds `redis.Cmdable` to provide all Redis commands automatically
+- **Connection Pool**: Configurable connection pool management
+- **Thread-Safe**: All operations are thread-safe via go-redis
+- **Pub/Sub Support**: Subscribe methods wait for confirmation before returning
+- **Pool Statistics**: Monitor connection pool health via `PoolStats()`
 
 ## Installation
 
@@ -716,6 +724,230 @@ cfg := &cache.SyncableCacheConfig{
 cfg := &cache.SyncableCacheConfig{
     SyncInterval: 30 * time.Second,  // More frequent sync
 }
+```
+
+---
+
+## Redis Client
+
+### Quick Start
+
+```go
+package main
+
+import (
+    "context"
+    "time"
+
+    "github.com/dailyyoga/nexgo/cache"
+    "github.com/dailyyoga/nexgo/logger"
+    "github.com/redis/go-redis/v9"
+)
+
+func main() {
+    log, _ := logger.New(nil)
+    defer log.Sync()
+
+    // Create Redis client
+    cfg := &cache.RedisConfig{
+        Addr:     "localhost:6379",
+        Password: "",        // No password
+        DB:       0,         // Default DB
+        PoolSize: 10,        // Connection pool size
+    }
+
+    rdb, err := cache.NewRedis(log, cfg)
+    if err != nil {
+        panic(err)
+    }
+    defer rdb.Close()
+
+    ctx := context.Background()
+
+    // String operations
+    rdb.Set(ctx, "key", "value", time.Hour)
+    val, err := rdb.Get(ctx, "key").Result()
+    if err == cache.Nil {
+        // Key does not exist
+    }
+
+    // Hash operations
+    rdb.HSet(ctx, "user:1", "name", "Alice", "age", "25")
+    name, _ := rdb.HGet(ctx, "user:1", "name").Result()
+
+    // List operations
+    rdb.LPush(ctx, "queue", "task1", "task2")
+    task, _ := rdb.RPop(ctx, "queue").Result()
+
+    log.Info("Redis operations completed")
+}
+```
+
+### Configuration
+
+```go
+type RedisConfig struct {
+    Addr            string        // Redis address (default: localhost:6379)
+    Password        string        // Password for auth (default: "")
+    DB              int           // Database number (default: 0)
+    PoolSize        int           // Max connections (default: 10)
+    MinIdleConns    int           // Min idle connections (default: 5)
+    MaxRetries      int           // Max retries (default: 3)
+    DialTimeout     time.Duration // Dial timeout (default: 5s)
+    ReadTimeout     time.Duration // Read timeout (default: 3s)
+    WriteTimeout    time.Duration // Write timeout (default: 3s)
+    ConnMaxIdleTime time.Duration // Max idle time (default: 5m)
+    ConnMaxLifetime time.Duration // Max lifetime (default: 0, no limit)
+}
+```
+
+### Interface
+
+```go
+type Redis interface {
+    redis.Cmdable  // All 200+ Redis commands
+
+    // Subscribe subscribes to channels and waits for confirmation
+    Subscribe(ctx context.Context, channels ...string) (*redis.PubSub, error)
+
+    // PSubscribe subscribes to channel patterns and waits for confirmation
+    PSubscribe(ctx context.Context, patterns ...string) (*redis.PubSub, error)
+
+    // Close closes the client connection
+    Close() error
+
+    // Unwrap returns the underlying redis.Client for advanced operations
+    Unwrap() *redis.Client
+
+    // PoolStats returns connection pool statistics
+    PoolStats() *redis.PoolStats
+}
+```
+
+### Available Commands
+
+All commands from `redis.Cmdable` are available:
+
+| Category | Commands |
+|----------|----------|
+| **String** | Get, Set, SetNX, SetEX, MGet, MSet, Incr, Decr, Append, etc. |
+| **Key** | Del, Exists, Expire, TTL, Keys, Scan, Rename, Type, etc. |
+| **Hash** | HGet, HSet, HGetAll, HDel, HExists, HIncrBy, HScan, etc. |
+| **List** | LPush, RPush, LPop, RPop, LRange, LLen, LIndex, etc. |
+| **Set** | SAdd, SRem, SMembers, SIsMember, SCard, SInter, SUnion, etc. |
+| **Sorted Set** | ZAdd, ZRem, ZRange, ZRank, ZScore, ZCard, ZIncrBy, etc. |
+| **Script** | Eval, EvalSha, ScriptLoad, ScriptExists, ScriptFlush |
+| **Pub/Sub** | Publish (Subscribe/PSubscribe via custom methods) |
+| **Server** | Ping, Info, DBSize, FlushDB, etc. |
+
+### Usage Examples
+
+#### Distributed Lock
+
+```go
+// Acquire lock
+ok, _ := rdb.SetNX(ctx, "lock:resource", "owner-id", 30*time.Second).Result()
+if ok {
+    defer rdb.Del(ctx, "lock:resource")
+    // Do work...
+}
+```
+
+#### Pub/Sub
+
+```go
+// Subscribe to channel
+pubsub, err := rdb.Subscribe(ctx, "notifications")
+if err != nil {
+    return err
+}
+defer pubsub.Close()
+
+// Receive messages
+for msg := range pubsub.Channel() {
+    fmt.Printf("Received: %s\n", msg.Payload)
+}
+
+// Publish message
+rdb.Publish(ctx, "notifications", "hello")
+```
+
+#### Pattern Subscribe
+
+```go
+// Subscribe to pattern
+pubsub, err := rdb.PSubscribe(ctx, "events:*")
+if err != nil {
+    return err
+}
+defer pubsub.Close()
+
+for msg := range pubsub.Channel() {
+    fmt.Printf("Channel: %s, Pattern: %s, Payload: %s\n",
+        msg.Channel, msg.Pattern, msg.Payload)
+}
+```
+
+#### Pipeline
+
+```go
+// Use Unwrap() for pipeline operations
+pipe := rdb.Unwrap().Pipeline()
+incr := pipe.Incr(ctx, "counter")
+pipe.Expire(ctx, "counter", time.Hour)
+_, err := pipe.Exec(ctx)
+if err != nil {
+    return err
+}
+count, _ := incr.Result()
+```
+
+#### Transaction
+
+```go
+// Use Unwrap() for transaction operations
+err := rdb.Unwrap().Watch(ctx, func(tx *redis.Tx) error {
+    val, err := tx.Get(ctx, "key").Int()
+    if err != nil && err != redis.Nil {
+        return err
+    }
+
+    _, err = tx.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+        pipe.Set(ctx, "key", val+1, 0)
+        return nil
+    })
+    return err
+}, "key")
+```
+
+#### Pool Statistics
+
+```go
+stats := rdb.PoolStats()
+log.Info("pool stats",
+    zap.Uint32("hits", stats.Hits),
+    zap.Uint32("misses", stats.Misses),
+    zap.Uint32("timeouts", stats.Timeouts),
+    zap.Uint32("total_conns", stats.TotalConns),
+    zap.Uint32("idle_conns", stats.IdleConns),
+)
+```
+
+### Error Handling
+
+```go
+// Check for non-existent key
+val, err := rdb.Get(ctx, "key").Result()
+if err == cache.Nil {
+    // Key does not exist
+} else if err != nil {
+    // Other error
+}
+
+// Error constructors
+ErrInvalidRedisConfig(msg string) error  // Invalid configuration
+ErrRedisConnection(err error) error       // Connection failed
+ErrRedisOperation(op string, err error) error  // Operation failed
 ```
 
 ## License

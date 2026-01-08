@@ -71,16 +71,24 @@
 - 独立函数用于即发即弃场景
 - 命名 goroutine 以便更好地调试和记录日志
 
-### [cache](./cache) - 可同步缓存
+### [cache](./cache) - 可同步缓存 & Redis 客户端
 
-支持周期性同步的缓存，具备自动重试逻辑和指数退避。
+支持周期性同步的缓存和 Redis 客户端封装。
 
+**SyncableCache 可同步缓存：**
 - 基于 Go 泛型，支持任意数据类型的通用缓存
 - 从可配置数据源周期性后台同步
 - 自动重试，指数退避处理瞬态故障
 - 线程安全，在同步期间支持并发读取
 - 上下文感知，每次同步可配置超时
 - **引用类型安全性**：对于切片、映射、指针类型，`Get()` 返回引用 - 请将其视为只读以避免数据竞争
+
+**Redis：**
+- 基于 go-redis v9 的轻量封装，通过 `redis.Cmdable` 提供 200+ 命令
+- 可配置的连接池管理
+- 线程安全操作
+- 支持 Pub/Sub 订阅确认
+- 连接池状态监控
 
 [查看文档 →](./cache/README.md)
 
@@ -317,11 +325,56 @@ users := c.Get()
 // 如果需要修改，请先创建副本
 ```
 
+### Redis
+
+```go
+import (
+    "github.com/dailyyoga/nexgo/cache"
+    "github.com/dailyyoga/nexgo/logger"
+    "github.com/redis/go-redis/v9"
+)
+
+log, _ := logger.New(nil)
+
+// 创建 Redis 客户端
+cfg := &cache.RedisConfig{
+    Addr:     "localhost:6379",
+    PoolSize: 10,
+}
+rdb, _ := cache.NewRedis(log, cfg)
+defer rdb.Close()
+
+ctx := context.Background()
+
+// 字符串操作
+rdb.Set(ctx, "key", "value", time.Hour)
+val, _ := rdb.Get(ctx, "key").Result()
+
+// 检查键是否存在
+if err == cache.Nil {
+    // 键不存在
+}
+
+// 哈希操作
+rdb.HSet(ctx, "user:1", "name", "Alice", "age", "25")
+
+// 发布/订阅
+pubsub, _ := rdb.Subscribe(ctx, "channel")
+defer pubsub.Close()
+
+// 管道操作（通过 Unwrap）
+pipe := rdb.Unwrap().Pipeline()
+pipe.Incr(ctx, "counter")
+pipe.Expire(ctx, "counter", time.Hour)
+pipe.Exec(ctx)
+```
+
 ## 依赖
 
 - Go 1.24.6+
 - [ClickHouse/clickhouse-go/v2](https://github.com/ClickHouse/clickhouse-go)
 - [confluentinc/confluent-kafka-go/v2](https://github.com/confluentinc/confluent-kafka-go)
+- [redis/go-redis/v9](https://github.com/redis/go-redis)
 - [robfig/cron/v3](https://github.com/robfig/cron)
 - [uber-go/zap](https://github.com/uber-go/zap)
 

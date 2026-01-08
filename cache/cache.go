@@ -9,9 +9,14 @@
 //
 // Available cache implementations:
 // - SyncableCache: A cache that periodically syncs data from a source
+// - Redis: A Redis client wrapper with connection pool management
 package cache
 
-import "context"
+import (
+	"context"
+
+	"github.com/redis/go-redis/v9"
+)
 
 // SyncFunc is a function that performs the actual sync operation
 // It should return the new cache data or an error
@@ -68,3 +73,27 @@ type SyncableCache[T any] interface {
 	// Returns error if sync fails after all retry attempts
 	Sync(ctx context.Context) error
 }
+
+// Redis is the interface for the Redis client
+// It embeds redis.Cmdable to provide access to all Redis commands
+type Redis interface {
+	redis.Cmdable
+
+	// Subscribe subscribes to channels and waits for confirmation
+	Subscribe(ctx context.Context, channels ...string) (*redis.PubSub, error)
+
+	// PSubscribe subscribes to channel patterns and waits for confirmation
+	PSubscribe(ctx context.Context, patterns ...string) (*redis.PubSub, error)
+
+	// Close closes the client connection
+	Close() error
+
+	// Unwrap returns the underlying redis.Client for advanced operations
+	Unwrap() *redis.Client
+
+	// PoolStats returns connection pool statistics
+	PoolStats() *redis.PoolStats
+}
+
+// Nil is redis.Nil - returned when key does not exist
+var Nil = redis.Nil

@@ -71,16 +71,24 @@ Safe goroutine execution with automatic panic recovery to prevent application cr
 - Standalone functions for fire-and-forget scenarios
 - Named goroutines for better debugging and logging
 
-### [cache](./cache) - Syncable Cache
+### [cache](./cache) - Syncable Cache & Redis Client
 
-Periodically syncing cache with automatic retry logic and exponential backoff.
+Periodically syncing cache with automatic retry logic, and Redis client wrapper.
 
+**SyncableCache:**
 - Generic cache supporting any data type with Go generics
 - Periodic background synchronization from configurable data source
 - Automatic retry with exponential backoff for transient failures
 - Thread-safe concurrent reads during sync operations
 - Context-aware with configurable timeout per sync
 - **Reference Type Safety**: For slice, map, pointer types, `Get()` returns a reference - treat as read-only to avoid data races
+
+**Redis:**
+- Thin wrapper around go-redis v9 with 200+ commands via `redis.Cmdable`
+- Connection pool management with configurable settings
+- Thread-safe operations
+- Pub/Sub support with subscription confirmation
+- Pool statistics monitoring
 
 [View documentation →](./cache/README.md)
 
@@ -317,11 +325,56 @@ users := c.Get()
 // If you need to modify, create a copy first
 ```
 
+### Redis
+
+```go
+import (
+    "github.com/dailyyoga/nexgo/cache"
+    "github.com/dailyyoga/nexgo/logger"
+    "github.com/redis/go-redis/v9"
+)
+
+log, _ := logger.New(nil)
+
+// Create Redis client
+cfg := &cache.RedisConfig{
+    Addr:     "localhost:6379",
+    PoolSize: 10,
+}
+rdb, _ := cache.NewRedis(log, cfg)
+defer rdb.Close()
+
+ctx := context.Background()
+
+// String operations
+rdb.Set(ctx, "key", "value", time.Hour)
+val, _ := rdb.Get(ctx, "key").Result()
+
+// Check if key exists
+if err == cache.Nil {
+    // Key does not exist
+}
+
+// Hash operations
+rdb.HSet(ctx, "user:1", "name", "Alice", "age", "25")
+
+// Pub/Sub
+pubsub, _ := rdb.Subscribe(ctx, "channel")
+defer pubsub.Close()
+
+// Pipeline (via Unwrap)
+pipe := rdb.Unwrap().Pipeline()
+pipe.Incr(ctx, "counter")
+pipe.Expire(ctx, "counter", time.Hour)
+pipe.Exec(ctx)
+```
+
 ## Dependencies
 
 - Go 1.24.6+
 - [ClickHouse/clickhouse-go/v2](https://github.com/ClickHouse/clickhouse-go)
 - [confluentinc/confluent-kafka-go/v2](https://github.com/confluentinc/confluent-kafka-go)
+- [redis/go-redis/v9](https://github.com/redis/go-redis)
 - [robfig/cron/v3](https://github.com/robfig/cron)
 - [uber-go/zap](https://github.com/uber-go/zap)
 
