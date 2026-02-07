@@ -458,6 +458,18 @@ func (c *IntConverter) Convert(val any, log logger.Logger) (any, error) {
 			return int64(0), nil
 		}
 		return int64(*v), nil
+	case uint8:
+		return int64(v), nil
+	case *uint8:
+		if v == nil {
+			return int64(0), nil
+		}
+		return int64(*v), nil
+	case *uint16:
+		if v == nil {
+			return int64(0), nil
+		}
+		return int64(*v), nil
 	case json.Number:
 		// json.Number preserves full precision (used with decoder.UseNumber())
 		if i, err := v.Int64(); err == nil {
